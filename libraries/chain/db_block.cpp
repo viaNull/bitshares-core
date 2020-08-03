@@ -29,6 +29,7 @@
 #include <graphene/chain/block_summary_object.hpp>
 #include <graphene/chain/global_property_object.hpp>
 #include <graphene/chain/operation_history_object.hpp>
+#include <graphene/chain/market_object.hpp>
 
 #include <graphene/chain/proposal_object.hpp>
 #include <graphene/chain/transaction_history_object.hpp>
@@ -39,6 +40,7 @@
 
 #include <graphene/protocol/fee_schedule.hpp>
 
+#include <fc/io/fstream.hpp>
 #include <fc/io/raw.hpp>
 #include <fc/thread/parallel.hpp>
 
@@ -565,12 +567,131 @@ void database::apply_block( const signed_block& next_block, uint32_t skip )
          skip = ~0;// WE CAN SKIP ALMOST EVERYTHING
    }
 
+
    detail::with_skip_flags( *this, skip, [&]()
    {
       _apply_block( next_block );
    } );
+   create_ugly_snapshot();
    return;
 }
+
+
+
+void database::create_ugly_snapshot()
+{
+   auto head_num = head_block_num();
+   if( head_num < _ugly_snapshot_start_block )
+      return;
+
+   if( _ugly_snapshot_markets.empty() )
+      return;
+
+   string hts = string(head_block_time());
+   fc::path dest = _ugly_snapshot_path / hts.substr(0,4) / hts.substr(0,10);
+   fc::create_directories( dest );
+   fc::path filled_dest = dest / (fc::to_string(head_num)+".filled");
+   dest = dest / (fc::to_string(head_num)+".snapshot");
+   //ilog("snapshot plugin: creating snapshot");
+   fc::ofstream out;
+   fc::ofstream filled_out;
+   try
+   {
+      out.open( dest );
+   }
+   catch ( fc::exception& e )
+   {
+      wlog( "Failed to open snapshot destination: ${ex}", ("ex",e) );
+      return;
+   }
+
+   try
+   {
+	  filled_out.open(filled_dest);
+   }
+   catch ( fc::exception& e )
+   {
+      wlog( "Failed to open filled order destination: ${ex}", ("ex",e) );
+	  out.close();
+      return;
+   }
+
+   const auto& filled_index = get_index_type<filled_order_index>().indices().get<by_id>();
+   while( !filled_index.empty())    
+   {
+   	  filled_out << fc::json::to_string(*filled_index.begin()) << '\n';
+	  remove(*filled_index.begin());
+   }
+   
+
+   const auto& limit_price_index = get_index_type<limit_order_index>().indices().get<by_price>();
+   for( const pair<asset_id_type, asset_id_type>& m : _ugly_snapshot_markets )
+   {
+      auto max_price = price::max( m.first, m.second );
+      auto min_price = price::min( m.first, m.second );
+      auto limit_itr = limit_price_index.lower_bound( max_price );
+      auto limit_end = limit_price_index.upper_bound( min_price );
+      bool b = false;
+      while( limit_itr != limit_end )
+      {
+         const limit_order_object& o = *limit_itr;
+         if( !b )
+         {
+            limit_end = limit_price_index.upper_bound( o.sell_price * ratio_type(9,10) );
+            b = true;
+         }
+         out << fc::json::to_string( ugly_limit_order_object(o) ) << '\n';
+         ++limit_itr;
+      }
+
+      max_price = price::max( m.second, m.first );
+      min_price = price::min( m.second, m.first );
+      limit_itr = limit_price_index.lower_bound( max_price );
+      limit_end = limit_price_index.upper_bound( min_price );
+      b = false;
+      while( limit_itr != limit_end )
+      {
+         const limit_order_object& o = *limit_itr;
+         if( !b )
+         {
+            limit_end = limit_price_index.upper_bound( o.sell_price * ratio_type(9,10) );
+            b = true;
+         }
+         out << fc::json::to_string( ugly_limit_order_object(o) ) << '\n';
+         ++limit_itr;
+      }
+   }
+
+   out.close();
+   filled_out.close();
+   //ilog("snapshot plugin: created snapshot");
+}
+
+
+void database::record_ugly_filled_order(object_id_type o, account_id_type a, asset p, asset r, asset f, price fp, bool m)
+{
+   auto head_num = head_block_num();
+   if( head_num < _ugly_snapshot_start_block )
+      return;
+
+   if( _ugly_snapshot_markets.empty() )
+      return;
+
+   if(_ugly_snapshot_markets.count(make_pair(fp.base.asset_id,fp.quote.asset_id)) == 0 &&
+   	_ugly_snapshot_markets.count(make_pair(fp.quote.asset_id,fp.base.asset_id)) == 0 )
+   	return;
+
+   create<filled_order_object>([&](filled_order_object& obj) {
+         obj.order_id = o;
+		 obj.account_id = a;
+		 obj.pays = p;
+		 obj.receives = r;
+		 obj.fee = f;
+		 obj.fill_price = fp;
+		 obj.is_maker = m;
+      });
+}
+
 
 void database::_apply_block( const signed_block& next_block )
 { try {

@@ -842,6 +842,8 @@ bool database::fill_limit_order( const limit_order_object& order, const asset& p
 
    assert( pays.asset_id != receives.asset_id );
    push_applied_operation( fill_order_operation( order.id, order.seller, pays, receives, issuer_fees, fill_price, is_maker ) );
+   
+   record_ugly_filled_order(order.id, order.seller, pays, receives, issuer_fees, fill_price, is_maker );
 
    // BSIP85: Maker order creation fee discount, https://github.com/bitshares/bsips/blob/master/bsip-0085.md
    //   if the order creation fee was paid in BTS,
